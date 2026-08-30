@@ -137,6 +137,10 @@ def _executable(path: Path) -> Path:
     return path
 
 
+def _command_name(name: str) -> str:
+    return f"{name}.exe" if os.name == "nt" else name
+
+
 def _put_mise_on_path(directory: Path, monkeypatch: MonkeyPatch) -> None:
     directory.mkdir()
     _executable(directory / ("mise.exe" if os.name == "nt" else "mise"))
@@ -147,7 +151,7 @@ def test_local_command_is_looked_up_and_validated_on_every_request(
     tmp_path: Path, processes: ProcessHarness, monkeypatch: MonkeyPatch
 ) -> None:
     bin_dir = tmp_path / "bin"
-    executable = _executable(bin_dir / "nats-server")
+    executable = _executable(bin_dir / _command_name("nats-server"))
     monkeypatch.setenv("PATH", str(bin_dir))
 
     first = _command(Local(), tmp_path)
@@ -167,7 +171,7 @@ def test_local_custom_command_name_is_searched_on_path(
     tmp_path: Path, processes: ProcessHarness, monkeypatch: MonkeyPatch
 ) -> None:
     bin_dir = tmp_path / "bin"
-    executable = _executable(bin_dir / "nats-server-another")
+    executable = _executable(bin_dir / _command_name("nats-server-another"))
     monkeypatch.setenv("PATH", str(bin_dir))
 
     assert _command(Local("nats-server-another"), tmp_path) == (str(executable.resolve()),)
