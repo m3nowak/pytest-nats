@@ -907,6 +907,98 @@ def test_filesystem_failure_is_a_provisioning_error(
     assert raised.value.__cause__ is failure
 
 
+def test_publication_retries_when_the_target_is_temporarily_locked(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    version = "2.14.6"
+    archive_name = f"nats-server-v{version}-linux-amd64.tar.gz"
+    archive = make_tar_archive(f"nats-server-v{version}-linux-amd64/nats-server", b"complete server")
+    digest = hashlib.sha256(archive).hexdigest()
+    release_url = f"https://github.com/nats-io/nats-server/releases/download/v{version}"
+    client = FakeClient(
+        {
+            f"{release_url}/{archive_name}": FakeResponse(archive),
+            f"{release_url}/SHA256SUMS": FakeResponse(f"{digest}  {archive_name}\n".encode()),
+        }
+    )
+    real_replace = os.replace
+    attempts: list[Path] = []
+
+    def replace(source: object, destination: object, **_kwargs: object) -> None:
+        attempts.append(cast(Path, source))
+        if len(attempts) < 3:
+            raise PermissionError(5, "Access is denied")
+        real_replace(cast(Path, source), cast(Path, destination))
+
+    def run(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(command, 0, stdout=f"nats-server: v{version}\n", stderr="")
+
+    def client_factory(**_kwargs: object) -> FakeClient:
+        return client
+
+    def sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("pytest_nats._provisioning.httpx2.Client", client_factory)
+    monkeypatch.setattr("pytest_nats._provisioning.subprocess.run", run)
+    monkeypatch.setattr("pytest_nats._provisioning.os.replace", replace)
+    monkeypatch.setattr("pytest_nats._provisioning.time.sleep", sleep)
+    monkeypatch.setattr("pytest_nats._provisioning.platform.system", lambda: "Linux")
+    monkeypatch.setattr("pytest_nats._provisioning.platform.machine", lambda: "x86_64")
+
+    command = build_nats_command(ProvisioningConfig(version=version, provider="github", cache_dir=tmp_path))
+
+    executable = tmp_path / version / "linux" / "amd64" / "nats-server"
+    assert command == (str(executable),)
+    assert len(attempts) == 3
+    assert executable.read_bytes() == b"complete server"
+    assert list(executable.parent.iterdir()) == [executable]
+
+
+def test_publication_failure_after_retries_is_a_provisioning_error(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    version = "2.14.6"
+    archive_name = f"nats-server-v{version}-linux-amd64.tar.gz"
+    archive = make_tar_archive(f"nats-server-v{version}-linux-amd64/nats-server", b"complete server")
+    digest = hashlib.sha256(archive).hexdigest()
+    release_url = f"https://github.com/nats-io/nats-server/releases/download/v{version}"
+    client = FakeClient(
+        {
+            f"{release_url}/{archive_name}": FakeResponse(archive),
+            f"{release_url}/SHA256SUMS": FakeResponse(f"{digest}  {archive_name}\n".encode()),
+        }
+    )
+    denied = PermissionError(5, "Access is denied")
+
+    def replace(_source: object, _destination: object, **_kwargs: object) -> None:
+        raise denied
+
+    def run(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(command, 0, stdout=f"nats-server: v{version}\n", stderr="")
+
+    def client_factory(**_kwargs: object) -> FakeClient:
+        return client
+
+    def sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("pytest_nats._provisioning.httpx2.Client", client_factory)
+    monkeypatch.setattr("pytest_nats._provisioning.subprocess.run", run)
+    monkeypatch.setattr("pytest_nats._provisioning.os.replace", replace)
+    monkeypatch.setattr("pytest_nats._provisioning.time.sleep", sleep)
+    monkeypatch.setattr("pytest_nats._provisioning.platform.system", lambda: "Linux")
+    monkeypatch.setattr("pytest_nats._provisioning.platform.machine", lambda: "x86_64")
+
+    with raises(AcquisitionError) as raised:
+        build_nats_command(ProvisioningConfig(version=version, provider="github", cache_dir=tmp_path))
+
+    assert raised.value.category is ErrorCategory.PROVISIONING
+    assert raised.value.__cause__ is denied
+
+
 def test_mise_timeout_is_a_provisioning_error(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

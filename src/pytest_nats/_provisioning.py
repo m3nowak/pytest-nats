@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass
 from enum import Enum
@@ -313,7 +314,7 @@ def _provision_from_github(
         actual_version = _executable_version(executable_path)
         if actual_version != version:
             raise ValueError(f"expected NATS Server {version}, got {actual_version}")
-        os.replace(executable_path, target)
+        _publish(executable_path, target)
         _LOGGER.debug("Published validated GitHub cache entry %s", target)
         return (str(target),)
     except AcquisitionError:
@@ -334,6 +335,17 @@ def _temporary_path(directory: Path, prefix: str) -> Path:
     descriptor, name = tempfile.mkstemp(dir=directory, prefix=prefix)
     os.close(descriptor)
     return Path(name)
+
+
+def _publish(source: Path, target: Path) -> None:
+    for attempt in range(5):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05 * 2**attempt)
 
 
 def _download(client: httpx2.Client, url: str, destination: Path) -> None:
