@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Pytest helpers for running ad-hoc NATS servers"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "httpx2>=2.12.0",
+    "platformdirs>=4.11.5",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.7,<0.13"]
@@ -23,7 +26,8 @@ pythonVersion = "3.11"
 typeCheckingMode = "strict"
 
 [tool.pytest.ini_options]
-addopts = ["--strict-config", "--strict-markers"]
+addopts = ["--strict-config", "--strict-markers", "-m", "not integration"]
+markers = ["integration: uses real NATS providers and requires PYTEST_NATS_RUN_INTEGRATION=1"]
 testpaths = ["tests"]
 
 [tool.ruff]
