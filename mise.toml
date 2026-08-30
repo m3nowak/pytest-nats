@@ -7,7 +7,7 @@ run = "mise install"
 
 [tasks.setup]
 description = "Create the environment and install dependencies"
-run = "uv sync"
+run = "uv sync --locked"
 
 [tasks.test]
 description = "Run the test suite"
