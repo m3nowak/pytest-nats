@@ -42,6 +42,8 @@ class ReleaseArtifact:
 
 @dataclass
 class ProcessHarness:
+    CalledProcessError = subprocess.CalledProcessError
+
     installation: Path
     version: str = "2.14.6"
     versions: dict[str, str] = field(default_factory=_versions)
@@ -67,7 +69,7 @@ class ProcessHarness:
 @fixture
 def processes(tmp_path: Path, monkeypatch: MonkeyPatch) -> ProcessHarness:
     harness = ProcessHarness(tmp_path / "mise-installation")
-    monkeypatch.setattr("pytest_nats._provisioning.subprocess.run", harness.run)
+    monkeypatch.setattr("pytest_nats._provisioning.subprocess", harness)
     return harness
 
 
