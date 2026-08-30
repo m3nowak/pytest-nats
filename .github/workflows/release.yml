@@ -23,7 +23,7 @@ jobs:
         env:
           TAG: ${{ github.event.release.tag_name }}
         run: ls "dist/pytest_nats-${TAG#v}-py3-none-any.whl" "dist/pytest_nats-${TAG#v}.tar.gz"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: distributions
           path: dist/
@@ -37,7 +37,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: distributions
           path: dist/
