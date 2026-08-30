@@ -1,0 +1,260 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable PEP 440 version to publish, for example 0.0.1
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release request
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.release.outputs.mode }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v4
+      - name: Require the main branch
+        if: github.ref_type != 'branch' || github.ref_name != github.event.repository.default_branch
+        run: exit 1
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          uv run --no-project --with packaging python - <<'PY'
+          import os
+          from packaging.version import InvalidVersion, Version
+
+          value = os.environ["VERSION"]
+          try:
+              version = Version(value)
+          except InvalidVersion as error:
+              raise SystemExit(f"Invalid PEP 440 version: {value}") from error
+          if str(version) != value or version.is_prerelease or version.is_devrelease or version.local is not None:
+              raise SystemExit(f"Version must be a canonical stable public version: {value}")
+          PY
+      - name: Reject shallow history
+        run: test "$(git rev-parse --is-shallow-repository)" = false
+      - name: Inspect release tag
+        id: tag
+        env:
+          TAG: v${{ inputs.version }}
+        run: echo "sha=$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)" >> "$GITHUB_OUTPUT"
+      - name: Inspect draft release
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: v${{ inputs.version }}
+        run: |
+          if gh release view "$TAG" --json isDraft --jq .isDraft > /tmp/is-draft; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "draft=$(cat /tmp/is-draft)" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "draft=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Inspect PyPI version
+        id: pypi
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          uv run --no-project python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          version = os.environ["VERSION"]
+          url = f"https://pypi.org/pypi/pytest-nats/{version}/json"
+          try:
+              with urllib.request.urlopen(url, timeout=30) as response:
+                  files = {item["filename"] for item in json.load(response)["urls"]}
+          except urllib.error.HTTPError as error:
+              if error.code == 404:
+                  files = set()
+              else:
+                  raise
+          expected = {
+              f"pytest_nats-{version}.tar.gz",
+              f"pytest_nats-{version}-py3-none-any.whl",
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"exists={str(bool(files)).lower()}", file=output)
+              print(f"complete={str(files == expected).lower()}", file=output)
+          PY
+      - name: Classify release state
+        id: release
+        env:
+          DRAFT: ${{ steps.draft.outputs.draft }}
+          RELEASE_EXISTS: ${{ steps.draft.outputs.exists }}
+          PYPI_COMPLETE: ${{ steps.pypi.outputs.complete }}
+          PYPI_EXISTS: ${{ steps.pypi.outputs.exists }}
+          REMOTE_SHA: ${{ steps.tag.outputs.sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$PYPI_COMPLETE" = true ]; then
+            test "$REMOTE_SHA" = "$GITHUB_SHA"
+            test "$DRAFT" = true
+            mode=finalize
+          elif [ "$PYPI_EXISTS" = true ]; then
+            echo "PyPI has a partial release; retry the failed publish job from its original workflow run" >&2
+            exit 1
+          elif [ -z "$REMOTE_SHA" ] && [ "$RELEASE_EXISTS" = false ]; then
+            mode=publish
+          elif [ "$REMOTE_SHA" = "$GITHUB_SHA" ] && { [ "$RELEASE_EXISTS" = false ] || [ "$DRAFT" = true ]; }; then
+            mode=publish
+          else
+            echo "Release state conflicts with the requested version and commit" >&2
+            exit 1
+          fi
+          printf 'mode=%s\nversion=%s\ntag=v%s\n' "$mode" "$VERSION" "$VERSION" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: Complete CI
+    needs: validate
+    if: needs.validate.outputs.mode == 'publish'
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build and validate distributions
+    needs: [validate, ci]
+    if: needs.validate.outputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v4
+      - name: Verify complete history
+        run: |
+          git fetch --force --tags
+          test "$(git rev-parse --is-shallow-repository)" = false
+      - name: Build source distribution and wheel
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          git tag "$TAG"
+          uv build --sdist --out-dir dist
+          uv build --wheel "dist/pytest_nats-$VERSION.tar.gz" --out-dir dist
+      - name: Validate distributions
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          uvx twine check dist/*
+          uv run python scripts/validate_distribution.py "$VERSION" dist
+      - name: Install and import wheel in a clean environment
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          uv venv /tmp/pytest-nats-release
+          uv pip install --python /tmp/pytest-nats-release/bin/python "dist/pytest_nats-$VERSION-py3-none-any.whl"
+          /tmp/pytest-nats-release/bin/python -I -c "import pytest_nats"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  stage:
+    name: Stage draft GitHub Release
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-distributions
+          path: dist
+      - name: Push release tag
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          remote_sha=$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)
+          if [ -z "$remote_sha" ]; then
+            git tag "$TAG" "${{ github.sha }}"
+            git push origin "refs/tags/$TAG"
+          elif [ "$remote_sha" != "${{ github.sha }}" ]; then
+            echo "$TAG exists at $remote_sha, expected ${{ github.sha }}" >&2
+            exit 1
+          fi
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          if gh release view "$TAG" --json isDraft --jq .isDraft > /tmp/is-draft; then
+            test "$(cat /tmp/is-draft)" = true
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --draft --generate-notes --verify-tag --title "$TAG"
+          fi
+
+  publish:
+    name: Publish distributions to PyPI
+    needs: stage
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pytest-nats
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-distributions
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  finalize:
+    name: Publish GitHub Release
+    needs: [validate, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false --latest
+
+  recover:
+    name: Finalize an existing publication
+    needs: validate
+    if: needs.validate.outputs.mode == 'finalize'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false --latest
