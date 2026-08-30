@@ -63,6 +63,14 @@ class ProvisioningConfig:
 
 
 @dataclass(frozen=True)
+class ProvisionedNats:
+    """A validated NATS command and its resolved NATS version."""
+
+    command: tuple[str, ...]
+    resolved_version: str
+
+
+@dataclass(frozen=True)
 class _ManagedPlatform:
     cache_system: str
     cache_architecture: str
@@ -76,7 +84,11 @@ class _ManagedPlatform:
 
 def build_nats_command(config: ProvisioningConfig | None = None) -> tuple[str, ...]:
     """Return an immutable command containing a validated NATS executable."""
-    config = config or ProvisioningConfig()
+    return provision_nats(config).command
+
+
+def validate_provisioning_config(config: ProvisioningConfig) -> None:
+    """Reject provisioning configuration that needs no external work to validate."""
     if config.executable is not None and config.version is not None:
         raise AcquisitionError(
             ErrorCategory.INVALID_CONFIGURATION,
@@ -88,6 +100,30 @@ def build_nats_command(config: ProvisioningConfig | None = None) -> tuple[str, .
             "a user-supplied executable cannot be combined with a managed provider policy",
         )
     if config.executable is not None:
+        return
+    selector = _validated_selector(config.version if config.version is not None else "latest")
+    if selector != "latest" and selector.split(".", 1)[0] != "2":
+        raise AcquisitionError(
+            ErrorCategory.INVALID_CONFIGURATION,
+            "managed NATS provisioning supports only major version 2",
+        )
+    if selector.startswith(("2.0.", "2.1.")) or selector in ("2.0", "2.1"):
+        raise AcquisitionError(
+            ErrorCategory.INVALID_CONFIGURATION,
+            "the version selector does not include a supported NATS release (>=2.2.0,<3)",
+        )
+    if config.provider not in ("auto", "mise", "github"):
+        raise AcquisitionError(
+            ErrorCategory.INVALID_CONFIGURATION,
+            f"invalid managed provider policy: {config.provider!r}",
+        )
+
+
+def provision_nats(config: ProvisioningConfig | None = None) -> ProvisionedNats:
+    """Provision a NATS command and retain its validated resolved version."""
+    config = config or ProvisioningConfig()
+    validate_provisioning_config(config)
+    if config.executable is not None:
         executable = Path(config.executable).resolve()
         try:
             version = _executable_version(executable)
@@ -96,26 +132,21 @@ def build_nats_command(config: ProvisioningConfig | None = None) -> tuple[str, .
                 ErrorCategory.PROVISIONING,
                 f"failed to validate user-supplied NATS executable: {executable}",
             ) from exc
-        if not version.startswith("2."):
+        if not _is_supported_release(version):
             raise AcquisitionError(
                 ErrorCategory.PROVISIONING,
-                "the user-supplied executable is not NATS Server 2.x",
+                "the user-supplied executable is not a supported NATS release (>=2.2.0,<3)",
             )
-        return (str(executable),)
+        return ProvisionedNats((str(executable),), version)
 
     selector = _validated_selector(config.version if config.version is not None else "latest")
-    if selector != "latest" and selector.split(".", 1)[0] != "2":
-        raise AcquisitionError(
-            ErrorCategory.INVALID_CONFIGURATION,
-            "managed NATS provisioning supports only major version 2",
-        )
-    if config.provider not in ("auto", "mise", "github"):
-        raise AcquisitionError(
-            ErrorCategory.INVALID_CONFIGURATION,
-            f"invalid managed provider policy: {config.provider!r}",
-        )
     managed_platform = _managed_platform()
     version = selector if selector.count(".") == 2 else _resolve_version(selector)
+    if not _is_supported_release(version):
+        raise AcquisitionError(
+            ErrorCategory.INVALID_CONFIGURATION,
+            "the version selector does not identify a supported NATS release (>=2.2.0,<3)",
+        )
     mise = shutil.which("mise")
     if config.provider == "mise" and mise is None:
         raise AcquisitionError(
@@ -125,12 +156,21 @@ def build_nats_command(config: ProvisioningConfig | None = None) -> tuple[str, .
     if config.provider == "mise" or (config.provider == "auto" and mise is not None):
         assert mise is not None
         _LOGGER.debug("Selected mise to provision NATS Server %s", version)
-        return _provision_from_mise(Path(mise).resolve(), version, managed_platform)
+        command = _provision_from_mise(Path(mise).resolve(), version, managed_platform)
+        return ProvisionedNats(command, version)
     _LOGGER.debug("Selected GitHub to provision NATS Server %s", version)
-    return _provision_from_github(
+    return ProvisionedNats(
+        _provision_from_github(version, managed_platform, config.cache_dir),
         version,
-        managed_platform,
-        config.cache_dir,
+    )
+
+
+def _is_supported_release(version: str) -> bool:
+    match = re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", version)
+    return (
+        match is not None
+        and (int(match.group(1)), int(match.group(2)), int(match.group(3))) >= (2, 2, 0)
+        and int(match.group(1)) < 3
     )
 
 
@@ -235,7 +275,7 @@ def _resolve_version(selector: str) -> str:
                     if match is None:
                         continue
                     version = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-                    if version[0] != 2 or not _selector_matches(selector, version):
+                    if version < (2, 2, 0) or version[0] != 2 or not _selector_matches(selector, version):
                         continue
                     matches.append(version)
                 if len(payload) < 100:

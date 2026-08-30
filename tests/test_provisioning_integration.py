@@ -14,7 +14,7 @@ pytestmark = [
     ),
 ]
 
-_INTEGRATION_VERSION = "2.14.6"
+_INTEGRATION_VERSION = "2.12.15"
 
 
 def test_github_provisions_a_fixed_release(tmp_path: Path) -> None:

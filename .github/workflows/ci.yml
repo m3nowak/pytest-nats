@@ -29,3 +29,20 @@ jobs:
       - uses: jdx/mise-action@v4
       - run: mise run setup
       - run: mise run check
+
+  integration:
+    name: Integration Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTEST_NATS_RUN_INTEGRATION: "1"
+      UV_PYTHON: ${{ matrix.python-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.15"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v4
+      - run: mise run setup
+      - run: uv run pytest -m integration

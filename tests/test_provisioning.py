@@ -158,6 +158,22 @@ def test_user_supplied_executable_must_report_nats_2(
     assert raised.value.category is ErrorCategory.PROVISIONING
 
 
+@mark.parametrize("version", ["2.0.0", "2.1.9", "2.2.0-rc1", "3.0.0"])
+def test_user_supplied_executable_must_report_a_supported_release(
+    version: str,
+    tmp_path: Path,
+    processes: ProcessHarness,
+) -> None:
+    executable = tmp_path / "nats-server"
+    executable.touch()
+    processes.version = version
+
+    with raises(AcquisitionError, match="supported NATS release") as raised:
+        build_nats_command(ProvisioningConfig(executable=executable))
+
+    assert raised.value.category is ErrorCategory.PROVISIONING
+
+
 def test_conflicting_configuration_is_rejected(tmp_path: Path) -> None:
     with raises(AcquisitionError) as raised:
         build_nats_command(ProvisioningConfig(version="2.14.6", executable=tmp_path / "nats-server"))
@@ -169,6 +185,14 @@ def test_conflicting_configuration_is_rejected(tmp_path: Path) -> None:
 def test_invalid_version_selector_is_rejected(selector: object) -> None:
     with raises(AcquisitionError) as raised:
         build_nats_command(ProvisioningConfig(version=cast(Any, selector), provider="github"))
+
+    assert raised.value.category is ErrorCategory.INVALID_CONFIGURATION
+
+
+@mark.parametrize("selector", ["2.0", "2.1.9"])
+def test_managed_selector_must_include_a_supported_release(selector: str) -> None:
+    with raises(AcquisitionError, match="supported NATS release") as raised:
+        build_nats_command(ProvisioningConfig(version=selector, provider="github"))
 
     assert raised.value.category is ErrorCategory.INVALID_CONFIGURATION
 
