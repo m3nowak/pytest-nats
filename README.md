@@ -65,48 +65,58 @@ session_nats = nats_server_fixture(scope="session", jetstream=True)
 
 Supported scopes are `function`, `module`, and `session`.
 
-## Provisioning
+## NATS executable selection
 
-By default, `latest` is resolved with the `auto` provider policy. Stable NATS
-releases from 2.2.0 up to, but not including, 3.0.0 are supported.
+By default, pytest-nats finds `nats-server` on setup-time `PATH` and validates
+that it reports a NATS 2.x semantic version. Use `Local` to select another
+command name or path. Relative paths containing a directory are resolved from
+pytest's root path.
 
 ```python
 from pathlib import Path
 
-fixed_nats = nats_server_fixture(version="2.12.15")
-major_minor_nats = nats_server_fixture(version="2.12", provider="github")
-mise_nats = nats_server_fixture(version="2", provider="mise")
-cached_nats = nats_server_fixture(cache_dir=Path(".cache/nats"))
-local_nats = nats_server_fixture(executable=Path("/opt/nats/nats-server"))
+from pytest_nats import GitHub, Local, Mise, Provision, nats_server_fixture
+
+default_local_nats = nats_server_fixture()
+alternate_local_nats = nats_server_fixture(Local("nats-server-another"))
+local_path_nats = nats_server_fixture(Local(Path("tools/nats-server")))
+latest_nats = nats_server_fixture(Provision())
+mise_nats = nats_server_fixture(Mise("2.12"))
+github_nats = nats_server_fixture(GitHub("2.12.15", cache_dir=Path(".cache/nats")))
 ```
 
-Provider choices are `auto`, `mise`, and `github`. A user-supplied executable
-cannot be combined with `version` or a managed provider. `startup_timeout`
-sets the positive setup deadline in seconds and defaults to 10 seconds.
+`Local`, `Provision`, `Mise`, and `GitHub` are immutable source values. Raw
+strings and paths are not accepted as the fixture's `binary` argument.
+`Provision` prefers Mise when it is available on setup-time `PATH` and uses
+GitHub otherwise. Automatic provisioning accepts `latest`, major, major-minor,
+and exact stable NATS 2.x selectors that can select releases starting at 2.2.0.
+`startup_timeout` sets the positive setup deadline in seconds and defaults to
+10 seconds.
 
 ### mise
 
-[mise](https://mise.jdx.dev/) is a development-tool version manager. When
-`provider="mise"` is selected, pytest-nats asks the `mise` executable on `PATH`
-to install and locate the resolved release through its
+[mise](https://mise.jdx.dev/) is a development-tool version manager. `Mise`
+asks the `mise` executable on `PATH` to install and locate the selector through its
 [GitHub backend](https://mise.jdx.dev/dev-tools/backends/github.html). The
-`auto` policy also selects mise when it is available; otherwise it uses the
-GitHub provider.
+selector is passed directly to Mise. Successful acquisition is reused for the
+rest of the pytest process, while failures remain retryable.
 
 ### GitHub
 
-The `github` provider downloads official
+`GitHub` downloads official
 [NATS Server releases](https://github.com/nats-io/nats-server/releases),
-verifies their published checksums, and stores validated executables in the
-selected cache directory. Set the optional `GITHUB_TOKEN` environment variable
+verifies their published checksums, and atomically stores executables in the
+selected cache directory. Existing regular executable cache entries are trusted
+without running or rehashing them. Set the optional `GITHUB_TOKEN` environment variable
 to authenticate GitHub API and download requests, which can avoid anonymous API
 rate limits. See GitHub's
 [personal access token documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
 for token creation and handling guidance.
 
-Provisioning, startup, and lifecycle failures raise `NatsServerError`. Its
-`returncode`, `stdout`, and `stderr` attributes retain available diagnostics;
-the same diagnostics are included in the exception message.
+Executable lookup, version resolution, and provisioning failures raise
+`NatsExecutableError`. Its `category` is an `ExecutableErrorCategory` value.
+Server startup and lifecycle failures raise `NatsServerError`; its `returncode`,
+`stdout`, and `stderr` attributes retain available diagnostics.
 
 ## Development
 
