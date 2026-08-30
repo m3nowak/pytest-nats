@@ -130,3 +130,24 @@ Apply automatic lint and formatting fixes:
 ```shell
 mise run fix
 ```
+
+## Releasing
+
+Releases run from `.github/workflows/release.yml`. The workflow accepts a stable,
+canonical PEP 440 version, runs the complete CI workflow, builds and validates
+the source distribution and wheel, publishes them to PyPI, then publishes the
+draft GitHub Release. Run it from the `main` branch in the GitHub Actions UI.
+The first intended version is `0.0.1`, which creates tag `v0.0.1`.
+
+Before the first release, create a pending Trusted Publisher on PyPI with these
+values:
+
+- PyPI project: `pytest-nats`
+- GitHub owner: `m3nowak`
+- GitHub repository: `pytest-nats`
+- Workflow filename: `release.yml`
+- Environment: `pypi`
+
+Create the `pypi` environment in the GitHub repository without required
+reviewers. The workflow requests an OIDC token only in the PyPI publication job;
+no PyPI API token is needed.

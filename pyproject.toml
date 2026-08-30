@@ -1,18 +1,40 @@
 [project]
 name = "pytest-nats"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Pytest helpers for running ad-hoc NATS servers"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Typing :: Typed",
+]
 dependencies = [
     "httpx2>=2.12.0",
     "platformdirs>=4.11.5",
     "pytest>=8.4.2",
 ]
 
+[project.urls]
+Repository = "https://github.com/m3nowak/pytest-nats"
+Issues = "https://github.com/m3nowak/pytest-nats/issues"
+
 [build-system]
-requires = ["uv_build>=0.12.7,<0.13"]
-build-backend = "uv_build"
+requires = ["pdm-backend>=2.4.0,<3"]
+build-backend = "pdm.backend"
+
+[tool.pdm.version]
+source = "scm"
+tag_filter = "v*"
+fallback_version = "0.0.0"
 
 [dependency-groups]
 dev = [
