@@ -2,9 +2,9 @@ import os
 from pathlib import Path
 from typing import Any, cast
 
-from pytest import Pytester, mark, raises
+from pytest import MonkeyPatch, Pytester, mark, raises
 
-from pytest_nats import nats_server_fixture
+from pytest_nats import NatsExecutableError, nats_server_fixture
 
 
 @mark.parametrize("scope", ["class", "package", "invalid"])
@@ -31,18 +31,15 @@ def test_fixture_rejects_non_positive_resource_settings(setting: str, value: obj
         nats_server_fixture(**cast(dict[str, Any], {setting: value}))
 
 
-def test_fixture_rejects_conflicting_provisioning_settings(tmp_path: Path) -> None:
-    with raises(ValueError, match="executable"):
-        nats_server_fixture(version="2.12.15", executable=tmp_path / "nats-server")
+@mark.parametrize("binary", ["nats-server", Path("nats-server")])
+def test_fixture_rejects_raw_binary_values(binary: object) -> None:
+    with raises(NatsExecutableError, match="Local"):
+        nats_server_fixture(cast(Any, binary))
 
 
-@mark.parametrize("version", ["2.1.9", "3.0.0"])
-def test_fixture_rejects_unsupported_exact_releases(version: str) -> None:
-    with raises(ValueError, match="supported NATS release|major version 2"):
-        nats_server_fixture(version=version, provider="github")
-
-
-def test_fixture_reports_startup_process_diagnostics(pytester: Pytester) -> None:
+def test_fixture_defaults_to_local_lookup_and_reports_startup_diagnostics(
+    pytester: Pytester, monkeypatch: MonkeyPatch
+) -> None:
     executable = pytester.path / ("nats-server.cmd" if os.name == "nt" else "nats-server")
     source = (
         """@echo off
@@ -68,11 +65,12 @@ raise SystemExit(7)
     )
     executable.write_text(source, encoding="utf-8")
     executable.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(pytester.path), os.environ.get("PATH", ""))))
     pytester.makeconftest(
-        f"""
+        """
 from pytest_nats import nats_server_fixture
 
-failed_server = nats_server_fixture(executable={str(executable)!r})
+failed_server = nats_server_fixture()
 """
     )
     pytester.makepyfile(

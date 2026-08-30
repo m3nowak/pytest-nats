@@ -8,7 +8,7 @@ import nats
 import pytest
 from nats.js.api import StorageType, StreamConfig
 
-from pytest_nats import NatsServer, nats_server_fixture
+from pytest_nats import GitHub, NatsServer, nats_server_fixture
 
 pytestmark = [
     pytest.mark.integration,
@@ -20,9 +20,9 @@ pytestmark = [
 
 _INTEGRATION_VERSION = "2.12.15"
 
-core_nats = nats_server_fixture(version=_INTEGRATION_VERSION, provider="github", scope="module")
-jetstream_nats = nats_server_fixture(version=_INTEGRATION_VERSION, provider="github", jetstream=True, scope="module")
-function_nats = nats_server_fixture(version=_INTEGRATION_VERSION, provider="github")
+core_nats = nats_server_fixture(GitHub(_INTEGRATION_VERSION), scope="module")
+jetstream_nats = nats_server_fixture(GitHub(_INTEGRATION_VERSION), jetstream=True, scope="module")
+function_nats = nats_server_fixture(GitHub(_INTEGRATION_VERSION))
 
 _function_servers: list[NatsServer] = []
 _module_servers: list[NatsServer] = []

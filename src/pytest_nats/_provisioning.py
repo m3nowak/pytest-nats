@@ -1,8 +1,9 @@
-"""Internal NATS executable provisioning."""
+"""NATS executable selection and provisioning."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import platform
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import cache
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
 import httpx2
 from platformdirs import user_cache_path
@@ -28,7 +29,7 @@ _SEMANTIC_VERSION = (
     r"(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
-_NATS_VERSION_PATTERN = re.compile(rf"^nats-server: v(?P<version>{_SEMANTIC_VERSION})$")
+_NATS_VERSION_PATTERN = re.compile(rf"nats-server: v(?P<version>{_SEMANTIC_VERSION})")
 _SELECTOR_PATTERN = re.compile(r"^(?:latest|(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))?(?:\.(?:0|[1-9]\d*))?)$")
 _STABLE_VERSION_PATTERN = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _RELEASE_DOWNLOAD_URL = "https://github.com/nats-io/nats-server/releases/download"
@@ -36,42 +37,122 @@ _RELEASE_API_URL = "https://api.github.com/repos/nats-io/nats-server/releases"
 _LOGGER = logging.getLogger(__name__)
 
 
-class ErrorCategory(str, Enum):
-    """Stable failure categories for future pytest integration."""
+class ExecutableErrorCategory(str, Enum):
+    """Stable categories for NATS executable acquisition failures."""
 
-    INVALID_CONFIGURATION = "invalid_configuration"
+    CONFIGURATION = "configuration"
+    LOCAL = "local"
     VERSION_RESOLUTION = "version_resolution"
     PROVISIONING = "provisioning"
 
 
-class AcquisitionError(Exception):
-    """Failure to build a validated NATS command."""
+class NatsExecutableError(Exception):
+    """Failure to acquire a NATS command."""
 
-    def __init__(self, category: ErrorCategory, message: str) -> None:
+    def __init__(self, category: ExecutableErrorCategory, message: str) -> None:
         super().__init__(message)
         self.category = category
 
 
-@dataclass(frozen=True)
-class ProvisioningConfig:
-    """Inputs for building one validated NATS command."""
-
-    version: str | None = None
-    executable: str | Path | None = None
-    provider: Literal["auto", "mise", "github"] = "auto"
-    cache_dir: Path | None = None
+def _configuration_error(message: str) -> NatsExecutableError:
+    return NatsExecutableError(ExecutableErrorCategory.CONFIGURATION, message)
 
 
-@dataclass(frozen=True)
-class ProvisionedNats:
-    """A validated NATS command and its resolved NATS version."""
+def _local_value(value: object) -> str:
+    if isinstance(value, str):
+        executable = value
+    elif isinstance(value, os.PathLike):
+        executable = cast(os.PathLike[str] | os.PathLike[bytes], value).__fspath__()
+    else:
+        raise _configuration_error("Local executable must be a string or string-compatible path")
+    if not isinstance(executable, str):
+        raise _configuration_error("Local executable must be a string or string-compatible path")
+    if executable == "" or Path(executable) == Path("."):
+        raise _configuration_error("Local executable cannot be empty or the current directory")
+    return executable
+
+
+def _selector(value: object) -> str:
+    if not isinstance(value, str) or _SELECTOR_PATTERN.fullmatch(value) is None:
+        raise _configuration_error(f"invalid NATS version selector: {value!r}")
+    if value != "latest" and value.split(".", 1)[0] != "2":
+        raise _configuration_error("provisioning supports only NATS major version 2")
+    if value in ("2.0", "2.1") or value.startswith(("2.0.", "2.1.")):
+        raise _configuration_error("the selector cannot select a supported NATS release (>=2.2.0,<3)")
+    return value
+
+
+def _cache_value(value: object | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        path = value
+    elif isinstance(value, os.PathLike):
+        path = cast(os.PathLike[str] | os.PathLike[bytes], value).__fspath__()
+    else:
+        raise _configuration_error("cache_dir must be a string-compatible path")
+    if not isinstance(path, str):
+        raise _configuration_error("cache_dir must be a string-compatible path")
+    return path
+
+
+@dataclass(frozen=True, slots=True)
+class Local:
+    """Select a local NATS executable by command name or filesystem path."""
+
+    executable: str = "nats-server"
+
+    def __init__(self, executable: object = "nats-server") -> None:
+        object.__setattr__(self, "executable", _local_value(executable))
+
+
+@dataclass(frozen=True, slots=True)
+class Provision:
+    """Provision NATS with Mise when available, otherwise GitHub."""
+
+    version: str = "latest"
+    cache_dir: str | None = None
+
+    def __init__(self, version: object = "latest", *, cache_dir: object | None = None) -> None:
+        object.__setattr__(self, "version", _selector(version))
+        object.__setattr__(self, "cache_dir", _cache_value(cache_dir))
+
+
+@dataclass(frozen=True, slots=True)
+class Mise:
+    """Provision NATS through Mise."""
+
+    version: str = "latest"
+
+    def __init__(self, version: object = "latest") -> None:
+        object.__setattr__(self, "version", _selector(version))
+
+
+@dataclass(frozen=True, slots=True)
+class GitHub:
+    """Provision NATS from an official GitHub release."""
+
+    version: str = "latest"
+    cache_dir: str | None = None
+
+    def __init__(self, version: object = "latest", *, cache_dir: object | None = None) -> None:
+        object.__setattr__(self, "version", _selector(version))
+        object.__setattr__(self, "cache_dir", _cache_value(cache_dir))
+
+
+NatsExecutableSource = Local | Provision | Mise | GitHub
+
+
+@dataclass(frozen=True, slots=True)
+class AcquiredNats:
+    """An acquired NATS command and its resolved NATS version."""
 
     command: tuple[str, ...]
     resolved_version: str
 
 
-@dataclass(frozen=True)
-class _ManagedPlatform:
+@dataclass(frozen=True, slots=True)
+class _GitHubPlatform:
     cache_system: str
     cache_architecture: str
     archive_system: str
@@ -82,172 +163,113 @@ class _ManagedPlatform:
         return "nats-server.exe" if self.cache_system == "windows" else "nats-server"
 
 
-def build_nats_command(config: ProvisioningConfig | None = None) -> tuple[str, ...]:
-    """Return an immutable command containing a validated NATS executable."""
-    return provision_nats(config).command
-
-
-def validate_provisioning_config(config: ProvisioningConfig) -> None:
-    """Reject provisioning configuration that needs no external work to validate."""
-    if config.executable is not None and config.version is not None:
-        raise AcquisitionError(
-            ErrorCategory.INVALID_CONFIGURATION,
-            "a user-supplied executable cannot be combined with a version selector",
-        )
-    if config.executable is not None and config.provider != "auto":
-        raise AcquisitionError(
-            ErrorCategory.INVALID_CONFIGURATION,
-            "a user-supplied executable cannot be combined with a managed provider policy",
-        )
-    if config.executable is not None:
-        return
-    selector = _validated_selector(config.version if config.version is not None else "latest")
-    if selector != "latest" and selector.split(".", 1)[0] != "2":
-        raise AcquisitionError(
-            ErrorCategory.INVALID_CONFIGURATION,
-            "managed NATS provisioning supports only major version 2",
-        )
-    if selector.startswith(("2.0.", "2.1.")) or selector in ("2.0", "2.1"):
-        raise AcquisitionError(
-            ErrorCategory.INVALID_CONFIGURATION,
-            "the version selector does not include a supported NATS release (>=2.2.0,<3)",
-        )
-    if config.provider not in ("auto", "mise", "github"):
-        raise AcquisitionError(
-            ErrorCategory.INVALID_CONFIGURATION,
-            f"invalid managed provider policy: {config.provider!r}",
-        )
-
-
-def provision_nats(config: ProvisioningConfig | None = None) -> ProvisionedNats:
-    """Provision a NATS command and retain its validated resolved version."""
-    config = config or ProvisioningConfig()
-    validate_provisioning_config(config)
-    if config.executable is not None:
-        executable = Path(config.executable).resolve()
-        try:
-            version = _executable_version(executable)
-        except Exception as exc:
-            raise AcquisitionError(
-                ErrorCategory.PROVISIONING,
-                f"failed to validate user-supplied NATS executable: {executable}",
-            ) from exc
-        if not _is_supported_release(version):
-            raise AcquisitionError(
-                ErrorCategory.PROVISIONING,
-                "the user-supplied executable is not a supported NATS release (>=2.2.0,<3)",
+def acquire_nats(source: NatsExecutableSource, root_path: Path) -> AcquiredNats:
+    """Acquire one NATS command during fixture setup."""
+    if isinstance(source, Local):
+        return _acquire_local(source, root_path)
+    if isinstance(source, Provision):
+        mise = shutil.which("mise")
+        if mise is not None:
+            return _acquire_mise(Mise(source.version), Path(mise))
+        return _acquire_github(GitHub(source.version, cache_dir=source.cache_dir), root_path)
+    if isinstance(source, Mise):
+        mise = shutil.which("mise")
+        if mise is None:
+            raise NatsExecutableError(
+                ExecutableErrorCategory.PROVISIONING,
+                "Mise was requested but the mise command is not available on PATH",
             )
-        return ProvisionedNats((str(executable),), version)
-
-    selector = _validated_selector(config.version if config.version is not None else "latest")
-    managed_platform = _managed_platform()
-    version = selector if selector.count(".") == 2 else _resolve_version(selector)
-    if not _is_supported_release(version):
-        raise AcquisitionError(
-            ErrorCategory.INVALID_CONFIGURATION,
-            "the version selector does not identify a supported NATS release (>=2.2.0,<3)",
-        )
-    mise = shutil.which("mise")
-    if config.provider == "mise" and mise is None:
-        raise AcquisitionError(
-            ErrorCategory.PROVISIONING,
-            "the mise provider was requested but mise is not available on PATH",
-        )
-    if config.provider == "mise" or (config.provider == "auto" and mise is not None):
-        assert mise is not None
-        _LOGGER.debug("Selected mise to provision NATS Server %s", version)
-        command = _provision_from_mise(Path(mise).resolve(), version, managed_platform)
-        return ProvisionedNats(command, version)
-    _LOGGER.debug("Selected GitHub to provision NATS Server %s", version)
-    return ProvisionedNats(
-        _provision_from_github(version, managed_platform, config.cache_dir),
-        version,
-    )
+        return _acquire_mise(source, Path(mise))
+    return _acquire_github(source, root_path)
 
 
-def _is_supported_release(version: str) -> bool:
-    match = re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", version)
-    return (
-        match is not None
-        and (int(match.group(1)), int(match.group(2)), int(match.group(3))) >= (2, 2, 0)
-        and int(match.group(1)) < 3
-    )
-
-
-def _validated_selector(selector: object) -> str:
-    if not isinstance(selector, str) or _SELECTOR_PATTERN.fullmatch(selector) is None:
-        raise AcquisitionError(
-            ErrorCategory.INVALID_CONFIGURATION,
-            f"invalid managed NATS version selector: {selector!r}",
-        )
-    return selector
-
-
-def _managed_platform() -> _ManagedPlatform:
-    systems = {
-        "Linux": ("linux", "linux"),
-        "Darwin": ("macos", "darwin"),
-        "Windows": ("windows", "windows"),
-    }
-    architectures = {
-        "x86_64": ("amd64", "amd64"),
-        "AMD64": ("amd64", "amd64"),
-        "aarch64": ("arm64", "arm64"),
-        "arm64": ("arm64", "arm64"),
-        "ARM64": ("arm64", "arm64"),
-    }
-    system_name = platform.system()
-    machine_name = platform.machine()
+def _acquire_local(source: Local, root_path: Path) -> AcquiredNats:
+    value = os.path.expanduser(source.executable)
+    path = Path(value)
     try:
-        system, archive_system = systems[system_name]
-        architecture, archive_architecture = architectures[machine_name]
-    except KeyError as exc:
-        raise AcquisitionError(
-            ErrorCategory.INVALID_CONFIGURATION,
-            f"managed NATS provisioning is unsupported on {system_name} {machine_name}",
+        if not path.is_absolute() and len(path.parts) == 1:
+            found = shutil.which(value)
+            if found is None:
+                raise FileNotFoundError(f"command not found on PATH: {value}")
+            path = Path(found)
+        elif not path.is_absolute():
+            path = root_path / path
+        executable = _resolved_path(path)
+        _validate_executable(executable)
+        version = _local_executable_version(executable)
+        if version.split(".", 1)[0] != "2":
+            raise ValueError(f"expected a NATS 2.x executable, got {version}")
+        return AcquiredNats((str(executable),), version)
+    except Exception as exc:
+        raise NatsExecutableError(
+            ExecutableErrorCategory.LOCAL,
+            f"failed to acquire local NATS executable {source.executable!r}",
         ) from exc
-    return _ManagedPlatform(system, architecture, archive_system, archive_architecture)
 
 
-def _provision_from_mise(mise: Path, version: str, managed_platform: _ManagedPlatform) -> tuple[str, ...]:
-    backend = f"github:nats-io/nats-server@{version}"
+@cache
+def _cached_mise(source: Mise, mise: Path) -> AcquiredNats:
+    backend = f"github:nats-io/nats-server@{source.version}"
     try:
-        install = subprocess.run(
-            [str(mise), "install", backend],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        _LOGGER.debug("mise install completed: %s", install.stdout.strip())
+        subprocess.run([str(mise), "install", backend], check=True, capture_output=True, text=True, timeout=300)
         location = subprocess.run(
-            [str(mise), "where", backend],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=300,
+            [str(mise), "where", backend], check=True, capture_output=True, text=True, timeout=300
         )
-        _LOGGER.debug("mise reported installation directory %s", location.stdout.strip())
-        executable = (Path(location.stdout.strip()) / managed_platform.executable_name).resolve()
-        actual_version = _executable_version(executable)
-        if actual_version != version:
-            raise ValueError(f"expected NATS Server {version}, got {actual_version}")
+        installation = _resolved_path(Path(location.stdout.strip()))
+        executable = installation / _host_executable_name()
+        _validate_executable(executable)
+        resolved_version = (
+            source.version if source.version.count(".") == 2 else _mise_resolved_version(mise, installation)
+        )
+        return AcquiredNats((str(executable),), resolved_version)
     except Exception as exc:
         details = ""
         if isinstance(exc, subprocess.CalledProcessError):
             output = (exc.stderr or exc.stdout or "").strip()
             details = f": {output}" if output else ""
-        raise AcquisitionError(
-            ErrorCategory.PROVISIONING,
-            f"mise failed to provision NATS Server {version}{details}",
+        raise NatsExecutableError(
+            ExecutableErrorCategory.PROVISIONING,
+            f"Mise failed to provision NATS Server for selector {source.version!r}{details}",
         ) from exc
-    return (str(executable),)
+
+
+def _acquire_mise(source: Mise, mise: Path) -> AcquiredNats:
+    return _cached_mise(source, _resolved_path(mise))
+
+
+def _mise_resolved_version(mise: Path, installation: Path) -> str:
+    listing = subprocess.run([str(mise), "ls", "--json"], check=True, capture_output=True, text=True, timeout=30)
+    payload: object = json.loads(listing.stdout)
+    if not isinstance(payload, dict):
+        raise TypeError("Mise tool listing is not an object")
+    for installations in cast(dict[object, object], payload).values():
+        if not isinstance(installations, list):
+            continue
+        for item in cast(list[object], installations):
+            if not isinstance(item, dict):
+                continue
+            record = cast(dict[object, object], item)
+            version = record.get("version")
+            install_path = record.get("install_path")
+            if (
+                isinstance(version, str)
+                and isinstance(install_path, str)
+                and _resolved_path(Path(install_path)) == installation
+            ):
+                return version
+    raise ValueError(f"Mise did not report the resolved version for {installation}")
+
+
+def _acquire_github(source: GitHub, root_path: Path) -> AcquiredNats:
+    version = source.version if source.version.count(".") == 2 else _resolve_version(source.version)
+    platform_value = _github_platform()
+    cache_root = _cache_root(source.cache_dir, root_path)
+    return AcquiredNats(_provision_from_github(version, platform_value, cache_root), version)
 
 
 @cache
 def _resolve_version(selector: str) -> str:
     matches: list[tuple[int, int, int]] = []
-    _LOGGER.debug("Resolving NATS version selector %s through GitHub", selector)
     try:
         with httpx2.Client(
             timeout=30,
@@ -275,25 +297,22 @@ def _resolve_version(selector: str) -> str:
                     if match is None:
                         continue
                     version = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-                    if version < (2, 2, 0) or version[0] != 2 or not _selector_matches(selector, version):
-                        continue
-                    matches.append(version)
+                    if version >= (2, 2, 0) and version[0] == 2 and _selector_matches(selector, version):
+                        matches.append(version)
                 if len(payload) < 100:
                     break
                 page += 1
     except Exception as exc:
-        raise AcquisitionError(
-            ErrorCategory.VERSION_RESOLUTION,
+        raise NatsExecutableError(
+            ExecutableErrorCategory.VERSION_RESOLUTION,
             f"failed to resolve NATS version selector {selector!r}",
         ) from exc
     if not matches:
-        raise AcquisitionError(
-            ErrorCategory.VERSION_RESOLUTION,
+        raise NatsExecutableError(
+            ExecutableErrorCategory.VERSION_RESOLUTION,
             f"no stable NATS 2.x release matches {selector!r}",
         )
-    resolved = ".".join(str(part) for part in max(matches))
-    _LOGGER.debug("Resolved NATS version selector %s to %s", selector, resolved)
-    return resolved
+    return ".".join(str(part) for part in max(matches))
 
 
 def _selector_matches(selector: str, version: tuple[int, int, int]) -> bool:
@@ -303,65 +322,78 @@ def _selector_matches(selector: str, version: tuple[int, int, int]) -> bool:
     return version[: len(requested)] == requested
 
 
-def _github_headers(token: str | None) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"} if token else {}
+def _github_platform() -> _GitHubPlatform:
+    systems = {"Linux": ("linux", "linux"), "Darwin": ("macos", "darwin"), "Windows": ("windows", "windows")}
+    architectures = {
+        "x86_64": ("amd64", "amd64"),
+        "AMD64": ("amd64", "amd64"),
+        "aarch64": ("arm64", "arm64"),
+        "arm64": ("arm64", "arm64"),
+        "ARM64": ("arm64", "arm64"),
+    }
+    system_name = platform.system()
+    machine_name = platform.machine()
+    try:
+        system, archive_system = systems[system_name]
+        architecture, archive_architecture = architectures[machine_name]
+    except KeyError as exc:
+        raise NatsExecutableError(
+            ExecutableErrorCategory.PROVISIONING,
+            f"GitHub provisioning is unsupported on {system_name} {machine_name}",
+        ) from exc
+    return _GitHubPlatform(system, architecture, archive_system, archive_architecture)
 
 
-def _provision_from_github(
-    version: str,
-    managed_platform: _ManagedPlatform,
-    cache_dir: Path | None,
-) -> tuple[str, ...]:
+def _cache_root(value: str | None, root_path: Path) -> Path:
+    if value is None:
+        return _resolved_path(user_cache_path("pytest-nats"))
+    path = Path(os.path.expanduser(value))
+    return _resolved_path(path if path.is_absolute() else root_path / path)
+
+
+def _provision_from_github(version: str, target_platform: _GitHubPlatform, cache_root: Path) -> tuple[str, ...]:
     archive_path: Path | None = None
     executable_path: Path | None = None
+    target = _resolved_path(
+        cache_root
+        / version
+        / target_platform.cache_system
+        / target_platform.cache_architecture
+        / target_platform.executable_name
+    )
     try:
-        target = (
-            (cache_dir or user_cache_path("pytest-nats"))
-            / version
-            / managed_platform.cache_system
-            / managed_platform.cache_architecture
-            / managed_platform.executable_name
-        )
-        target = _resolved_path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
-            try:
-                if _executable_version(target) == version:
-                    _LOGGER.debug("Using validated GitHub cache entry %s", target)
-                    return (str(target),)
-            except Exception:
-                _LOGGER.debug("Discarding invalid GitHub cache entry %s", target, exc_info=True)
-            target.unlink(missing_ok=True)
-        extension = "zip" if managed_platform.cache_system == "windows" else "tar.gz"
-        archive_name = f"nats-server-v{version}-{managed_platform.archive_system}-{managed_platform.archive_architecture}.{extension}"
+            if target.is_file() and os.access(target, os.X_OK):
+                return (str(target),)
+            if not target.is_dir():
+                target.unlink()
+        extension = "zip" if target_platform.cache_system == "windows" else "tar.gz"
+        archive_name = f"nats-server-v{version}-{target_platform.archive_system}-{target_platform.archive_architecture}.{extension}"
         release_url = f"{_RELEASE_DOWNLOAD_URL}/v{version}"
-        headers = _github_headers(os.environ.get("GITHUB_TOKEN"))
-
         archive_path = _temporary_path(target.parent, ".archive-")
         executable_path = _temporary_path(target.parent, ".executable-")
-        with httpx2.Client(timeout=30, follow_redirects=True, headers=headers) as client:
-            _LOGGER.debug("Downloading official NATS archive %s", archive_name)
+        with httpx2.Client(
+            timeout=30, follow_redirects=True, headers=_github_headers(os.environ.get("GITHUB_TOKEN"))
+        ) as client:
             _download(client, f"{release_url}/{archive_name}", archive_path)
             checksum_response = client.get(f"{release_url}/SHA256SUMS")
             checksum_response.raise_for_status()
             _verify_checksum(archive_path, archive_name, checksum_response.content)
         member_name = (
-            f"nats-server-v{version}-{managed_platform.archive_system}-{managed_platform.archive_architecture}/"
-            f"{managed_platform.executable_name}"
+            f"nats-server-v{version}-{target_platform.archive_system}-{target_platform.archive_architecture}/"
+            f"{target_platform.executable_name}"
         )
         _extract_executable(archive_path, member_name, executable_path, extension)
         executable_path.chmod(executable_path.stat().st_mode | 0o755)
-        actual_version = _executable_version(executable_path)
-        if actual_version != version:
-            raise ValueError(f"expected NATS Server {version}, got {actual_version}")
+        _validate_executable(executable_path)
         _publish(executable_path, target)
-        _LOGGER.debug("Published validated GitHub cache entry %s", target)
         return (str(target),)
-    except AcquisitionError:
+    except NatsExecutableError:
         raise
     except Exception as exc:
-        raise AcquisitionError(
-            ErrorCategory.PROVISIONING,
+        raise NatsExecutableError(
+            ExecutableErrorCategory.PROVISIONING,
             f"failed to provision NATS Server {version} from GitHub",
         ) from exc
     finally:
@@ -369,6 +401,30 @@ def _provision_from_github(
             archive_path.unlink(missing_ok=True)
         if executable_path is not None:
             executable_path.unlink(missing_ok=True)
+
+
+def _host_executable_name() -> str:
+    return "nats-server.exe" if os.name == "nt" else "nats-server"
+
+
+def _validate_executable(path: Path) -> None:
+    if not path.is_file():
+        raise FileNotFoundError(f"NATS executable is not a regular file: {path}")
+    if not os.access(path, os.X_OK):
+        raise PermissionError(f"NATS executable is not executable: {path}")
+
+
+def _local_executable_version(executable: Path) -> str:
+    result = subprocess.run([str(executable), "--version"], check=True, capture_output=True, text=True, timeout=5)
+    for line in (*result.stdout.splitlines(), *result.stderr.splitlines()):
+        match = _NATS_VERSION_PATTERN.fullmatch(line.strip())
+        if match is not None:
+            return match.group("version")
+    raise ValueError("unrecognized NATS Server version output")
+
+
+def _github_headers(token: str | None) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 def _temporary_path(directory: Path, prefix: str) -> Path:
@@ -438,18 +494,3 @@ def _extract_executable(archive_path: Path, member_name: str, destination: Path,
             raise ValueError(f"could not read archive member: {member_name}")
         with source, destination.open("wb") as target:
             shutil.copyfileobj(source, target)
-
-
-def _executable_version(executable: Path) -> str:
-    _LOGGER.debug("Validating NATS executable identity at %s", executable)
-    result = subprocess.run(
-        [str(executable), "--version"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    match = _NATS_VERSION_PATTERN.fullmatch(result.stdout.rstrip("\r\n"))
-    if match is None:
-        raise ValueError("unrecognized NATS Server version output")
-    return match.group("version")

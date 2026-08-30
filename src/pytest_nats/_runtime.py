@@ -21,16 +21,17 @@ from urllib.parse import urlparse
 import pytest
 
 from ._provisioning import (
-    AcquisitionError,
-    ErrorCategory,
-    ProvisioningConfig,
-    provision_nats,
-    validate_provisioning_config,
+    ExecutableErrorCategory,
+    GitHub,
+    Local,
+    Mise,
+    NatsExecutableError,
+    NatsExecutableSource,
+    Provision,
+    acquire_nats,
 )
 
 FixtureScope = Literal["function", "module", "session"]
-Provider = Literal["auto", "mise", "github"]
-
 _HOST = "127.0.0.1"
 _DEFAULT_MAX_MEMORY_STORE = 256 * 1024 * 1024
 _DEFAULT_MAX_FILE_STORE = 1024 * 1024 * 1024
@@ -39,7 +40,7 @@ _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 class NatsServerError(Exception):
-    """A NATS provisioning or server lifecycle failure."""
+    """A test NATS server startup or lifecycle failure."""
 
     def __init__(
         self,
@@ -137,14 +138,16 @@ class NatsServer:
 class _ServerProcess:
     def __init__(
         self,
-        config: ProvisioningConfig,
+        source: NatsExecutableSource,
+        root_path: Path,
         *,
         jetstream: bool,
         max_memory_store: int,
         max_file_store: int,
         startup_timeout: float,
     ) -> None:
-        self._config = config
+        self._source = source
+        self._root_path = root_path
         self._jetstream = jetstream
         self._max_memory_store = max_memory_store
         self._max_file_store = max_file_store
@@ -157,7 +160,7 @@ class _ServerProcess:
 
     def __enter__(self) -> NatsServer:
         try:
-            provisioned = provision_nats(self._config)
+            provisioned = acquire_nats(self._source, self._root_path)
             self._temporary_directory = tempfile.TemporaryDirectory(prefix="pytest-nats-")
             temporary_path = Path(self._temporary_directory.name)
             config_path = temporary_path / "nats.conf"
@@ -190,9 +193,9 @@ class _ServerProcess:
                 stdout=self._stdout,
                 stderr=self._stderr,
             )
-        except AcquisitionError as exc:
+        except NatsExecutableError:
             self._cleanup()
-            raise NatsServerError(f"failed to provision test NATS server: {exc}") from exc
+            raise
         except NatsServerError:
             self._stop()
             self._cleanup()
@@ -364,13 +367,10 @@ def _check_health(port: int, jetstream: bool) -> None:
 
 
 def nats_server_fixture(
+    binary: NatsExecutableSource | None = None,
     *,
     scope: FixtureScope = "function",
     jetstream: bool = False,
-    version: str | None = None,
-    executable: str | Path | None = None,
-    provider: Provider = "auto",
-    cache_dir: Path | None = None,
     max_memory_store: int = _DEFAULT_MAX_MEMORY_STORE,
     max_file_store: int = _DEFAULT_MAX_FILE_STORE,
     startup_timeout: float = 10.0,
@@ -389,18 +389,21 @@ def nats_server_fixture(
             raise ValueError(f"{name} must be a positive integer byte count")
     if not _is_positive_number(startup_timeout):
         raise ValueError("startup_timeout must be a positive duration in seconds")
-    config = ProvisioningConfig(version=version, executable=executable, provider=provider, cache_dir=cache_dir)
-    try:
-        validate_provisioning_config(config)
-    except AcquisitionError as exc:
-        if exc.category is ErrorCategory.INVALID_CONFIGURATION:
-            raise ValueError(str(exc)) from exc
-        raise
+    if binary is None:
+        source: NatsExecutableSource = Local()
+    elif isinstance(cast(object, binary), (Local, Provision, Mise, GitHub)):
+        source = binary
+    else:
+        raise NatsExecutableError(
+            ExecutableErrorCategory.CONFIGURATION,
+            "binary must be Local, Provision, Mise, GitHub, or None",
+        )
 
     @pytest.fixture(scope=scope)
-    def fixture_definition() -> Iterator[NatsServer]:
+    def fixture_definition(request: pytest.FixtureRequest) -> Iterator[NatsServer]:
         with _ServerProcess(
-            config,
+            source,
+            request.config.rootpath,
             jetstream=jetstream,
             max_memory_store=max_memory_store,
             max_file_store=max_file_store,
