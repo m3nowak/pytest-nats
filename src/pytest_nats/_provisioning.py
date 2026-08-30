@@ -282,7 +282,7 @@ def _provision_from_github(
             / managed_platform.cache_architecture
             / managed_platform.executable_name
         )
-        target = target.resolve()
+        target = _resolved_path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             try:
@@ -335,6 +335,16 @@ def _temporary_path(directory: Path, prefix: str) -> Path:
     descriptor, name = tempfile.mkstemp(dir=directory, prefix=prefix)
     os.close(descriptor)
     return Path(name)
+
+
+def _resolved_path(path: Path) -> Path:
+    resolved = path.resolve()
+    text = str(resolved)
+    if text.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + text[8:])
+    if text.startswith("\\\\?\\"):
+        return Path(text[4:])
+    return resolved
 
 
 def _publish(source: Path, target: Path) -> None:

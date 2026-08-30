@@ -999,6 +999,44 @@ def test_publication_failure_after_retries_is_a_provisioning_error(
     assert raised.value.__cause__ is denied
 
 
+def test_windows_extended_length_prefix_is_stripped_from_resolved_paths(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    version = "2.14.6"
+    archive_name = f"nats-server-v{version}-linux-amd64.tar.gz"
+    archive = make_tar_archive(f"nats-server-v{version}-linux-amd64/nats-server", b"complete server")
+    digest = hashlib.sha256(archive).hexdigest()
+    release_url = f"https://github.com/nats-io/nats-server/releases/download/v{version}"
+    client = FakeClient(
+        {
+            f"{release_url}/{archive_name}": FakeResponse(archive),
+            f"{release_url}/SHA256SUMS": FakeResponse(f"{digest}  {archive_name}\n".encode()),
+        }
+    )
+
+    def client_factory(**_kwargs: object) -> FakeClient:
+        return client
+
+    def resolve(self: Path, strict: bool = False) -> Path:
+        return Path(f"\\\\?\\{self.absolute()}")
+
+    def run(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(command, 0, stdout=f"nats-server: v{version}\n", stderr="")
+
+    monkeypatch.setattr("pytest_nats._provisioning.httpx2.Client", client_factory)
+    monkeypatch.setattr("pytest_nats._provisioning.subprocess.run", run)
+    monkeypatch.setattr(Path, "resolve", resolve)
+    monkeypatch.setattr("pytest_nats._provisioning.platform.system", lambda: "Linux")
+    monkeypatch.setattr("pytest_nats._provisioning.platform.machine", lambda: "x86_64")
+
+    command = build_nats_command(ProvisioningConfig(version=version, provider="github", cache_dir=tmp_path))
+
+    executable = tmp_path / version / "linux" / "amd64" / "nats-server"
+    assert command == (str(executable),)
+    assert executable.read_bytes() == b"complete server"
+
+
 def test_mise_timeout_is_a_provisioning_error(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
