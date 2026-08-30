@@ -1,0 +1,29 @@
+[tools]
+uv = "latest"
+
+[tasks.install]
+description = "Install the project tools"
+run = "mise install"
+
+[tasks.setup]
+description = "Create the environment and install dependencies"
+run = "uv sync"
+
+[tasks.test]
+description = "Run the test suite"
+run = "uv run pytest"
+
+[tasks.check]
+description = "Run lint, formatting, and type checks"
+run = """
+uv run ruff check .
+uv run ruff format --check .
+uv run pyright
+"""
+
+[tasks.fix]
+description = "Fix lint and formatting issues"
+run = """
+uv run ruff check --fix .
+uv run ruff format .
+"""
