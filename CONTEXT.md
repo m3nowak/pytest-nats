@@ -13,16 +13,16 @@ The exact semantic version of the stable NATS release selected by a version sele
 _Avoid_: Requested version, selected version
 
 **Supported NATS release**:
-An official stable release in the NATS 2.x line, starting with NATS 2.2.0.
+A stable NATS 2.x release, starting with NATS 2.2.0, that can be selected for automatic provisioning. This range does not constrain a user-supplied NATS executable.
 _Avoid_: Available version, GitHub tag
 
 **NATS command**:
-A launch command prefix for a provisioned or user-supplied `nats-server`, ready to be extended with runtime arguments.
+A launch command prefix for a provisioned or local `nats-server`, ready to be extended with runtime arguments.
 _Avoid_: Binary path, shell command
 
-**User-supplied NATS executable**:
-An existing `nats-server` selected instead of requesting a version for provisioning. Its reported identity is validated before it becomes a NATS command.
-_Avoid_: Custom version, local provider
+**Local NATS executable**:
+An existing NATS 2.x executable found by command name or selected by filesystem path instead of being provisioned. Its reported identity is validated before it becomes a NATS command.
+_Avoid_: User-supplied executable, custom version, local provider
 
 **Test NATS server**:
 An isolated, unauthenticated `nats-server` instance created for tests and owned by a pytest fixture for the fixture's selected scope. It can provide Core NATS alone or Core NATS with JetStream.
