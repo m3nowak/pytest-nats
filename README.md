@@ -84,6 +84,26 @@ Provider choices are `auto`, `mise`, and `github`. A user-supplied executable
 cannot be combined with `version` or a managed provider. `startup_timeout`
 sets the positive setup deadline in seconds and defaults to 10 seconds.
 
+### mise
+
+[mise](https://mise.jdx.dev/) is a development-tool version manager. When
+`provider="mise"` is selected, pytest-nats asks the `mise` executable on `PATH`
+to install and locate the resolved release through its
+[GitHub backend](https://mise.jdx.dev/dev-tools/backends/github.html). The
+`auto` policy also selects mise when it is available; otherwise it uses the
+GitHub provider.
+
+### GitHub
+
+The `github` provider downloads official
+[NATS Server releases](https://github.com/nats-io/nats-server/releases),
+verifies their published checksums, and stores validated executables in the
+selected cache directory. Set the optional `GITHUB_TOKEN` environment variable
+to authenticate GitHub API and download requests, which can avoid anonymous API
+rate limits. See GitHub's
+[personal access token documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+for token creation and handling guidance.
+
 Provisioning, startup, and lifecycle failures raise `NatsServerError`. Its
 `returncode`, `stdout`, and `stderr` attributes retain available diagnostics;
 the same diagnostics are included in the exception message.
