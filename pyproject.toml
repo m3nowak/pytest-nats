@@ -17,6 +17,7 @@ build-backend = "uv_build"
 dev = [
     "pyright>=1.1.405",
     "pytest>=8.4.2",
+    "pytest-httpx2>=1.0.0",
     "ruff>=0.12.12",
 ]
 
